@@ -56,7 +56,13 @@ flowchart LR
 
 ### 1. 获取已编译 runtime
 
-从本仓库的 Releases 页面下载：
+从 `v1.0.0` Release 下载编译好的 llama.cpp 运行库：
+
+```text
+https://github.com/zzs4057/v100-rtx5070-windows-dualgpu/releases/tag/v1.0.0
+```
+
+文件名：
 
 ```text
 llama-cuda12.9-windows-x64.zip
@@ -107,6 +113,12 @@ monitor\V100Monitor.exe
 
 ```text
 monitor\V100Monitor.exe --select-devices
+```
+
+多显卡监视器版本 `v1.1.0`：
+
+```text
+https://github.com/zzs4057/v100-rtx5070-windows-dualgpu/releases/tag/v1.1.0
 ```
 
 ## 从源码构建
