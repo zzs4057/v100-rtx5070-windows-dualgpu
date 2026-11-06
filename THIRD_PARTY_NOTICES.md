@@ -21,16 +21,6 @@ Project: https://developer.nvidia.com/cuda-toolkit
 The release may contain Microsoft Visual C++ redistributable runtime DLLs.
 Those files remain subject to Microsoft's redistribution terms.
 
-## GPU Sentinel monitor
-
-The monitor is original code in this repository. Its design was informed by the
-following open-source projects without copying their implementation:
-
-- `hanxiangmin/TaskbarTelemetry` (MIT)
-- `LibreHardwareMonitor/LibreHardwareMonitor` (MPL-2.0)
-- `jcbritobr/nvml-csharp` (MIT)
-- `Wheelem/V100_Monitor`
-
 ## Trademarks
 
 NVIDIA, GeForce, Tesla, CUDA, ASUS and Windows are trademarks of their

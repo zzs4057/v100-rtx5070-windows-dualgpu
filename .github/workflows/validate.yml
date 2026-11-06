@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  powershell-and-monitor:
+  powershell:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,13 +28,3 @@ jobs:
             }
           }
           if ($failed) { exit 1 }
-
-      - name: Build monitor
-        shell: pwsh
-        run: .\monitor\build.ps1
-
-      - name: Upload monitor artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: GPU-Sentinel
-          path: monitor/V100Monitor.exe

@@ -5,7 +5,7 @@
 [![CUDA](https://img.shields.io/badge/CUDA-12.9-76B900)](#prebuilt-runtime)
 [![llama.cpp](https://img.shields.io/badge/llama.cpp-v0.8.0-blue)](docs/llama-build.md)
 
-在 Windows 下让 RTX 5070 Laptop 与 Tesla V100-SXM2-16GB 同时被 llama.cpp 使用的可复现实验套件。仓库包含驱动共存方法、GPU 监视器、便携式 llama.cpp 图形启动器、编译脚本、成功记录和排障文档。
+在 Windows 下让 RTX 5070 Laptop 与 Tesla V100-SXM2-16GB 同时被 llama.cpp 使用的可复现实验套件。仓库包含驱动共存方法、便携式 llama.cpp 图形启动器、编译脚本、成功记录和排障文档。
 
 > Tested with Windows 11, RTX 5070 Laptop 8 GB, Tesla V100-SXM2 16 GB, NVIDIA 581.15, CUDA 12.9 and llama.cpp v0.8.0.
 
@@ -23,12 +23,17 @@ llama.cpp 日志同时识别两张卡，并将一个 35B MoE GGUF 的 41/41 层�
 ## 功能
 
 - Windows 双 NVIDIA GPU 共存记录和恢复顺序
-- `GPU Sentinel` WinForms 监视器：自动发现并选择核显、独显和计算卡；NVIDIA 显示利用率、显存、温度、功耗、时钟和 PCIe，Intel/AMD 等设备显示 PnP、驱动、INF、状态和问题代码
 - 便携式 llama.cpp PowerShell 图形启动器：多模型选择、视觉投影、MTP、上下文、端口、GPU 顺序和 tensor split
 - CUDA 12.9 + `sm_70;sm_120` 编译脚本
 - 已编译 Windows x64 runtime，作为 GitHub Release 资产发布
 - 成功日志摘要、驱动校验值和故障排查流程
 - 默认不收集遥测，不包含模型权重、NVIDIA 驱动安装包、账号或硬件 UUID
+
+GPU 状态监视器已经拆分为独立仓库：
+
+```text
+https://github.com/zzs4057/gpu-sentinel-win-x64
+```
 
 ## 它不是
 
@@ -101,24 +106,12 @@ start-llama.cmd
 4. 首次建议上下文从 4096 或 8192 开始。
 5. 启动后打开 `http://127.0.0.1:8080`。
 
-### 4. 启动监视器
+### 4. 启动 GPU 状态监视器
+
+多显卡监视器在独立仓库发布：
 
 ```text
-monitor\V100Monitor.exe
-```
-
-监视器只调用系统 `nvidia-smi`、PnP API 和 Windows 事件日志，不复制 NVIDIA DLL。
-
-点击顶部的“显卡”按钮可以勾选要同时监视的设备，例如 Intel 核显、RTX 5070 和 Tesla V100。也可用以下命令直接打开选择窗口：
-
-```text
-monitor\V100Monitor.exe --select-devices
-```
-
-多显卡监视器版本 `v1.1.0`：
-
-```text
-https://github.com/zzs4057/v100-rtx5070-windows-dualgpu/releases/tag/v1.1.0
+https://github.com/zzs4057/gpu-sentinel-win-x64
 ```
 
 ## 从源码构建
@@ -141,14 +134,6 @@ https://github.com/zzs4057/v100-rtx5070-windows-dualgpu/releases/tag/v1.1.0
 
 详细参数和 GPU 架构说明见 [docs/llama-build.md](docs/llama-build.md)。
 
-### GPU Sentinel
-
-```powershell
-.\monitor\build.ps1
-```
-
-构建使用 Windows 自带 .NET Framework 4.8 C# 编译器。
-
 ## 驱动
 
 仓库不包含 NVIDIA 安装包。保留并校验以下两个官方文件：
@@ -167,7 +152,7 @@ https://github.com/zzs4057/v100-rtx5070-windows-dualgpu/releases/tag/v1.1.0
 - 用户名、主机名、账号、邮箱、IP 地址或 MAC 地址
 - GPU UUID、序列号、Windows 设备实例序列
 - 完整本地路径
-- 原始监视器 CSV 和 llama 原始日志
+- 原始 llama 日志
 - GGUF 模型、Hugging Face token、GitHub token
 - NVIDIA 或 ASUS 驱动安装包
 
@@ -203,4 +188,4 @@ nvidia-smi --query-gpu=index,name,driver_version,memory.total,pstate --format=cs
 
 ---
 
-English: A privacy-conscious, community-tested Windows dual-GPU kit for RTX 5070 Laptop and Tesla V100 with llama.cpp, including driver-coexistence notes, a GPU monitor, a portable GUI launcher, source-build tooling, and release binaries.
+English: A privacy-conscious, community-tested Windows dual-GPU kit for RTX 5070 Laptop and Tesla V100 with llama.cpp, including driver-coexistence notes, a portable GUI launcher, source-build tooling, and release binaries.

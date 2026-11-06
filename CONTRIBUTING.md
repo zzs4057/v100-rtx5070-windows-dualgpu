@@ -15,7 +15,7 @@ Contributions are welcome through issues and pull requests.
 - Do not commit model weights, NVIDIA installers, generated logs or telemetry.
 - Do not commit credentials or machine-specific configuration.
 - Update documentation when behavior changes.
-- Run the PowerShell parser and monitor build checks described by CI.
+- Run the PowerShell parser checks described by CI.
 
 ## Driver-related changes
 
