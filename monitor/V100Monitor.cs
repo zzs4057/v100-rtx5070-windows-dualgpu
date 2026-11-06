@@ -19,7 +19,7 @@ namespace GpuSentinel
     internal static class Program
     {
         [STAThread]
-        private static void Main()
+        private static void Main(string[] commandLine)
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -36,7 +36,9 @@ namespace GpuSentinel
             {
                 TryWriteCrashLog(args.ExceptionObject as Exception);
             };
-            Application.Run(new MainForm());
+            bool showDeviceSelector = commandLine != null && commandLine.Any(item =>
+                string.Equals(item, "--select-devices", StringComparison.OrdinalIgnoreCase));
+            Application.Run(new MainForm(showDeviceSelector));
         }
 
         private static void TryWriteCrashLog(Exception exception)
@@ -95,6 +97,7 @@ namespace GpuSentinel
         public bool StartMinimized;
         public string LlamaUrl;
         public string LlamaPortable;
+        public List<string> SelectedDevices;
         public string ConfigPath;
 
         public AppConfig()
@@ -106,6 +109,7 @@ namespace GpuSentinel
             StartMinimized = false;
             LlamaUrl = "http://127.0.0.1:8080";
             LlamaPortable = string.Empty;
+            SelectedDevices = new List<string>();
             ConfigPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "V100Monitor.ini");
         }
 
@@ -164,6 +168,18 @@ namespace GpuSentinel
                         {
                             int.TryParse(value, out result.AlertPower);
                         }
+                        else if (key == "selected_devices")
+                        {
+                            result.SelectedDevices.Clear();
+                            foreach (string item in value.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+                            {
+                                string trimmed = item.Trim();
+                                if (trimmed.Length > 0)
+                                {
+                                    result.SelectedDevices.Add(trimmed);
+                                }
+                            }
+                        }
                     }
                     else if (section == "ui")
                     {
@@ -188,10 +204,37 @@ namespace GpuSentinel
             }
             return result;
         }
+
+        public void SaveSelectedDevices(IEnumerable<string> deviceIds)
+        {
+            SelectedDevices = (deviceIds ?? Enumerable.Empty<string>())
+                .Where(item => !string.IsNullOrWhiteSpace(item))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            List<string> lines = new List<string>();
+            lines.Add("[monitor]");
+            lines.Add("refresh_seconds=" + RefreshSeconds.ToString(CultureInfo.InvariantCulture));
+            lines.Add("history_points=" + HistoryPoints.ToString(CultureInfo.InvariantCulture));
+            lines.Add("alert_temperature=" + AlertTemperature.ToString(CultureInfo.InvariantCulture));
+            lines.Add("alert_power=" + AlertPower.ToString(CultureInfo.InvariantCulture));
+            lines.Add("selected_devices=" + string.Join(";", SelectedDevices));
+            lines.Add(string.Empty);
+            lines.Add("[ui]");
+            lines.Add("start_minimized=" + (StartMinimized ? "true" : "false"));
+            lines.Add("llama_url=" + LlamaUrl);
+            lines.Add(string.Empty);
+            lines.Add("[paths]");
+            lines.Add("llama_portable=" + LlamaPortable);
+            File.WriteAllLines(ConfigPath, lines, new UTF8Encoding(false));
+        }
     }
 
     internal sealed class GpuReading
     {
+        public string DeviceKey;
+        public string Vendor;
+        public bool TelemetryAvailable;
         public string Role;
         public string Name;
         public string StatusText;
@@ -222,6 +265,9 @@ namespace GpuSentinel
 
         public GpuReading(string role)
         {
+            DeviceKey = string.Empty;
+            Vendor = "Other";
+            TelemetryAvailable = false;
             Role = role;
             Name = role;
             StatusText = "未检测";
@@ -280,6 +326,7 @@ namespace GpuSentinel
         public bool Present;
         public string Name;
         public string InstanceId;
+        public string Vendor;
         public string Status;
         public int ProblemCode;
         public string DriverVersion;
@@ -290,6 +337,7 @@ namespace GpuSentinel
         {
             Name = string.Empty;
             InstanceId = string.Empty;
+            Vendor = "Other";
             Status = "Unknown";
             DriverVersion = string.Empty;
             InfName = string.Empty;
@@ -306,8 +354,7 @@ namespace GpuSentinel
     internal sealed class MonitorSnapshot
     {
         public DateTime Timestamp;
-        public GpuReading V100;
-        public GpuReading RTX5070;
+        public readonly List<GpuReading> Devices = new List<GpuReading>();
         public string OverallText;
         public HealthLevel OverallHealth;
         public string RawError;
@@ -317,10 +364,8 @@ namespace GpuSentinel
     internal sealed class HistorySample
     {
         public DateTime Timestamp;
-        public double V100Usage;
-        public double RTXUsage;
-        public double V100Temperature;
-        public double RTXTemperature;
+        public readonly Dictionary<string, double> Usage = new Dictionary<string, double>();
+        public readonly Dictionary<string, double> Temperature = new Dictionary<string, double>();
     }
 
     internal sealed class LogItem
@@ -513,6 +558,135 @@ namespace GpuSentinel
 
     internal static class PnpReader
     {
+        public static List<PnpReading> DiscoverDisplays()
+        {
+            List<PnpReading> devices = new List<PnpReading>();
+            List<DriverInfo> drivers = new List<DriverInfo>();
+
+            try
+            {
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                    "SELECT DeviceName,DriverVersion,InfName,DeviceID FROM Win32_PnPSignedDriver WHERE DeviceClass = 'DISPLAY'"))
+                using (ManagementObjectCollection collection = searcher.Get())
+                {
+                    foreach (ManagementObject item in collection)
+                    {
+                        using (item)
+                        {
+                            drivers.Add(new DriverInfo
+                            {
+                                DeviceId = Convert.ToString(item["DeviceID"], CultureInfo.InvariantCulture),
+                                Name = Convert.ToString(item["DeviceName"], CultureInfo.InvariantCulture),
+                                Version = Convert.ToString(item["DriverVersion"], CultureInfo.InvariantCulture),
+                                Inf = Convert.ToString(item["InfName"], CultureInfo.InvariantCulture)
+                            });
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
+                    "SELECT Name,PNPDeviceID,Status,ConfigManagerErrorCode,PNPClass FROM Win32_PnPEntity WHERE PNPClass = 'Display'"))
+                using (ManagementObjectCollection collection = searcher.Get())
+                {
+                    foreach (ManagementObject item in collection)
+                    {
+                        using (item)
+                        {
+                            string instanceId = Convert.ToString(item["PNPDeviceID"], CultureInfo.InvariantCulture);
+                            if (string.IsNullOrWhiteSpace(instanceId) ||
+                                !instanceId.StartsWith("PCI\\", StringComparison.OrdinalIgnoreCase))
+                            {
+                                continue;
+                            }
+
+                            PnpReading reading = new PnpReading();
+                            reading.Present = true;
+                            reading.Name = Convert.ToString(item["Name"], CultureInfo.InvariantCulture);
+                            reading.InstanceId = instanceId;
+                            reading.Status = Convert.ToString(item["Status"], CultureInfo.InvariantCulture);
+                            object code = item["ConfigManagerErrorCode"];
+                            reading.ProblemCode = code == null
+                                ? 0
+                                : Convert.ToInt32(code, CultureInfo.InvariantCulture);
+                            reading.ProblemText = DescribeProblem(reading.ProblemCode);
+                            reading.Vendor = DetectVendor(reading.Name, instanceId);
+
+                            DriverInfo driver = drivers.FirstOrDefault(candidate =>
+                                string.Equals(candidate.DeviceId, instanceId, StringComparison.OrdinalIgnoreCase));
+                            if (driver == null)
+                            {
+                                driver = drivers.FirstOrDefault(candidate =>
+                                    !string.IsNullOrWhiteSpace(candidate.Name) &&
+                                    string.Equals(candidate.Name, reading.Name, StringComparison.OrdinalIgnoreCase));
+                            }
+                            if (driver != null)
+                            {
+                                reading.DriverVersion = driver.Version;
+                                reading.InfName = driver.Inf;
+                            }
+                            devices.Add(reading);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return devices
+                .OrderBy(item => VendorRank(item.Vendor))
+                .ThenBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase)
+                .ToList();
+        }
+
+        public static string DetectVendor(string name, string instanceId)
+        {
+            string combined = (name ?? string.Empty) + " " + (instanceId ?? string.Empty);
+            if (combined.IndexOf("VEN_10DE", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                combined.IndexOf("NVIDIA", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                combined.IndexOf("GeForce", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                combined.IndexOf("Tesla", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                combined.IndexOf("Quadro", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "NVIDIA";
+            }
+            if (combined.IndexOf("VEN_8086", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                combined.IndexOf("Intel", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "Intel";
+            }
+            if (combined.IndexOf("VEN_1002", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                combined.IndexOf("VEN_1022", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                combined.IndexOf("AMD", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                combined.IndexOf("Radeon", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "AMD";
+            }
+            return "Other";
+        }
+
+        public static int VendorRank(string vendor)
+        {
+            if (string.Equals(vendor, "NVIDIA", StringComparison.OrdinalIgnoreCase)) return 0;
+            if (string.Equals(vendor, "Intel", StringComparison.OrdinalIgnoreCase)) return 1;
+            if (string.Equals(vendor, "AMD", StringComparison.OrdinalIgnoreCase)) return 2;
+            return 3;
+        }
+
+        private sealed class DriverInfo
+        {
+            public string DeviceId;
+            public string Name;
+            public string Version;
+            public string Inf;
+        }
+
         public static PnpReading Read(string deviceToken, string friendlyToken)
         {
             PnpReading reading = new PnpReading();
@@ -606,87 +780,158 @@ namespace GpuSentinel
     internal sealed class MonitorService
     {
         private DateTime lastPnpRefresh = DateTime.MinValue;
-        private PnpReading cachedV100;
-        private PnpReading cached5070;
+        private List<PnpReading> cachedPnp = new List<PnpReading>();
         private string cachedEvent;
         private DateTime lastEventRefresh = DateTime.MinValue;
         private readonly object syncRoot = new object();
+
+        public List<PnpReading> GetAvailableDevices()
+        {
+            lock (syncRoot)
+            {
+                cachedPnp = PnpReader.DiscoverDisplays();
+                lastPnpRefresh = DateTime.Now;
+                return cachedPnp.Select(item => item).ToList();
+            }
+        }
+
+        public void InvalidatePnpCache()
+        {
+            lock (syncRoot)
+            {
+                lastPnpRefresh = DateTime.MinValue;
+            }
+        }
 
         public MonitorSnapshot Capture(AppConfig config)
         {
             lock (syncRoot)
             {
                 DateTime now = DateTime.Now;
-                bool refreshPnp = cachedV100 == null || cached5070 == null ||
+                bool refreshPnp = cachedPnp.Count == 0 ||
                     (now - lastPnpRefresh).TotalSeconds >= 5;
                 if (refreshPnp)
                 {
-                    cachedV100 = PnpReader.Read("DEV_1DB1", "V100");
-                    cached5070 = PnpReader.Read("DEV_2D58", "5070");
+                    cachedPnp = PnpReader.DiscoverDisplays();
                     lastPnpRefresh = now;
                 }
 
                 SmiResult smi = NvidiaSmiReader.Read();
-                RawTelemetry v100Raw = Find(smi.Devices, "V100");
-                RawTelemetry rtxRaw = Find(smi.Devices, "5070");
-                GpuReading v100 = Merge("Tesla V100-SXM2-16GB", cachedV100, v100Raw);
-                GpuReading rtx = Merge("GeForce RTX 5070 Laptop GPU", cached5070, rtxRaw);
+                HashSet<string> selected = new HashSet<string>(
+                    config.SelectedDevices ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+                HashSet<RawTelemetry> usedRaw = new HashSet<RawTelemetry>();
 
-                if ((now - lastEventRefresh).TotalSeconds >= 20 &&
-                    (v100.Health == HealthLevel.Error || v100.Health == HealthLevel.Offline))
+                MonitorSnapshot snapshot = new MonitorSnapshot();
+                snapshot.Timestamp = now;
+                foreach (PnpReading pnp in cachedPnp)
+                {
+                    if (selected.Count > 0 && !selected.Contains(pnp.InstanceId))
+                    {
+                        continue;
+                    }
+
+                    RawTelemetry raw = null;
+                    if (string.Equals(pnp.Vendor, "NVIDIA", StringComparison.OrdinalIgnoreCase))
+                    {
+                        raw = FindRawTelemetry(pnp, smi.Devices, usedRaw);
+                    }
+                    snapshot.Devices.Add(Merge(pnp, raw));
+                }
+
+                snapshot.RawError = smi.Error;
+                bool nvidiaProblem = snapshot.Devices.Any(item =>
+                    string.Equals(item.Vendor, "NVIDIA", StringComparison.OrdinalIgnoreCase) &&
+                    item.Health != HealthLevel.Healthy);
+                if ((now - lastEventRefresh).TotalSeconds >= 20 && nvidiaProblem)
                 {
                     cachedEvent = ReadRecentDriverEvent();
                     lastEventRefresh = now;
                 }
-                v100.EventMessage = cachedEvent;
-
-                MonitorSnapshot snapshot = new MonitorSnapshot();
-                snapshot.Timestamp = now;
-                snapshot.V100 = v100;
-                snapshot.RTX5070 = rtx;
-                snapshot.RawError = smi.Error;
+                foreach (GpuReading reading in snapshot.Devices)
+                {
+                    if (string.Equals(reading.Vendor, "NVIDIA", StringComparison.OrdinalIgnoreCase))
+                    {
+                        reading.EventMessage = cachedEvent;
+                    }
+                }
                 snapshot.DriverEvent = cachedEvent;
 
-                if (v100.Health == HealthLevel.Healthy && rtx.Health == HealthLevel.Healthy)
+                if (snapshot.Devices.Count == 0)
                 {
-                    snapshot.OverallText = "双卡就绪";
-                    snapshot.OverallHealth = HealthLevel.Healthy;
-                }
-                else if (v100.Present && !v100.DriverStarted)
-                {
-                    snapshot.OverallText = "V100 驱动异常";
+                    snapshot.OverallText = "未发现可监视显卡";
                     snapshot.OverallHealth = HealthLevel.Error;
                 }
-                else if (!v100.Present)
+                else if (snapshot.Devices.Any(item => item.Health == HealthLevel.Error))
                 {
-                    snapshot.OverallText = "V100 未连接";
+                    snapshot.OverallText = "存在显卡驱动异常";
+                    snapshot.OverallHealth = HealthLevel.Error;
+                }
+                else if (snapshot.Devices.Any(item => item.Health == HealthLevel.Offline))
+                {
+                    snapshot.OverallText = "部分显卡未连接";
                     snapshot.OverallHealth = HealthLevel.Offline;
+                }
+                else if (snapshot.Devices.Any(item => item.Health == HealthLevel.Warning))
+                {
+                    snapshot.OverallText = "部分显卡仅基础监视";
+                    snapshot.OverallHealth = HealthLevel.Warning;
                 }
                 else
                 {
-                    snapshot.OverallText = "部分功能受限";
-                    snapshot.OverallHealth = HealthLevel.Warning;
+                    snapshot.OverallText = snapshot.Devices.Count.ToString(CultureInfo.InvariantCulture) + " 张显卡运行正常";
+                    snapshot.OverallHealth = HealthLevel.Healthy;
                 }
                 return snapshot;
             }
         }
 
-        private static RawTelemetry Find(IList<RawTelemetry> devices, string token)
+        private static RawTelemetry FindRawTelemetry(
+            PnpReading pnp, IList<RawTelemetry> devices, ISet<RawTelemetry> used)
         {
+            string target = NormalizeGpuName(pnp.Name);
             foreach (RawTelemetry device in devices)
             {
-                if (device.Name != null &&
-                    device.Name.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0)
+                if (used.Contains(device) || string.IsNullOrWhiteSpace(device.Name))
                 {
+                    continue;
+                }
+                string candidate = NormalizeGpuName(device.Name);
+                if (target.Length > 0 && candidate.Length > 0 &&
+                    (target.IndexOf(candidate, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                     candidate.IndexOf(target, StringComparison.OrdinalIgnoreCase) >= 0))
+                {
+                    used.Add(device);
                     return device;
                 }
             }
             return null;
         }
 
-        private static GpuReading Merge(string displayName, PnpReading pnp, RawTelemetry raw)
+        private static string NormalizeGpuName(string value)
         {
-            GpuReading result = new GpuReading(displayName);
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+            string normalized = value.ToLowerInvariant();
+            foreach (string token in new[]
+            {
+                "nvidia", "geforce", "tesla", "laptop", "gpu", "graphics",
+                "corporation", "intel(r)", "amd"
+            })
+            {
+                normalized = normalized.Replace(token, string.Empty);
+            }
+            return new string(normalized.Where(char.IsLetterOrDigit).ToArray());
+        }
+
+        private static GpuReading Merge(PnpReading pnp, RawTelemetry raw)
+        {
+            string vendor = pnp == null ? "Other" : pnp.Vendor;
+            GpuReading result = new GpuReading(vendor.ToUpperInvariant());
+            result.DeviceKey = pnp == null ? string.Empty : pnp.InstanceId;
+            result.Vendor = vendor;
+            result.TelemetryAvailable = raw != null;
             result.Present = pnp != null && pnp.Present;
             result.DriverStarted = result.Present && pnp.ProblemCode == 0;
             result.ProblemCode = pnp == null ? 0 : pnp.ProblemCode;
@@ -695,7 +940,7 @@ namespace GpuSentinel
             result.InfName = pnp == null ? "--" : Fallback(pnp.InfName);
             result.Name = raw != null && raw.Name.Length > 0
                 ? raw.Name
-                : (pnp != null && pnp.Name.Length > 0 ? pnp.Name : displayName);
+                : (pnp != null && pnp.Name.Length > 0 ? pnp.Name : vendor + " GPU");
             result.Mode = raw != null ? Fallback(raw.Mode) : "--";
             result.PendingMode = raw != null ? Fallback(raw.PendingMode) : "--";
             result.PState = raw != null ? Fallback(raw.PState) : "--";
@@ -742,9 +987,13 @@ namespace GpuSentinel
             }
             else if (raw == null)
             {
-                result.Health = HealthLevel.Warning;
-                result.StatusText = "设备存在";
-                result.StatusDetail = "nvidia-smi 未返回遥测";
+                result.StatusText = "运行正常";
+                result.StatusDetail = string.Equals(vendor, "NVIDIA", StringComparison.OrdinalIgnoreCase)
+                    ? "nvidia-smi 未返回该设备的详细遥测"
+                    : "Windows PnP 基础监视；该厂商未接入性能遥测";
+                result.Health = string.Equals(vendor, "NVIDIA", StringComparison.OrdinalIgnoreCase)
+                    ? HealthLevel.Warning
+                    : HealthLevel.Healthy;
             }
             else
             {
@@ -863,14 +1112,14 @@ namespace GpuSentinel
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
                 ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
             BackColor = Palette.Background;
-            subtitle = "V100 + RTX 5070 双卡状态";
+            subtitle = "自动发现并监视所选显卡";
             statusText = "正在初始化";
             statusHealth = HealthLevel.Offline;
             ButtonPanel = new FlowLayoutPanel();
             ButtonPanel.FlowDirection = FlowDirection.LeftToRight;
             ButtonPanel.WrapContents = false;
             ButtonPanel.AutoSize = false;
-            ButtonPanel.Width = 405;
+            ButtonPanel.Width = 440;
             ButtonPanel.Height = 38;
             ButtonPanel.BackColor = Color.Transparent;
             ButtonPanel.Anchor = AnchorStyles.Top | AnchorStyles.Right;
@@ -910,7 +1159,7 @@ namespace GpuSentinel
                     e.Graphics,
                     subtitle,
                     sub,
-                    new Rectangle(2, 43, Width - 420, 22),
+                    new Rectangle(2, 43, Math.Max(220, Width - ButtonPanel.Width - 30), 22),
                     Palette.Muted,
                     TextFormatFlags.Left | TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter);
 
@@ -955,7 +1204,7 @@ namespace GpuSentinel
                 ControlStyles.ResizeRedraw | ControlStyles.UserPaint | ControlStyles.SupportsTransparentBackColor, true);
             Glyph = "\uE72C";
             Label = "刷新";
-            Size = new Size(88, 34);
+            Size = new Size(76, 34);
             Cursor = Cursors.Hand;
             BackColor = Color.Transparent;
         }
@@ -1127,21 +1376,6 @@ namespace GpuSentinel
                 DrawDetail(e.Graphics, "INF", Fallback(Reading.InfName),
                     new Rectangle(18 + Width * 3 / 4, 234, Width / 4 - 30, 36), small, smallValue);
 
-                string detail = Reading.StatusDetail;
-                if (!string.IsNullOrWhiteSpace(Reading.EventMessage) &&
-                    Reading.Health != HealthLevel.Healthy)
-                {
-                    detail = Reading.EventMessage;
-                }
-                if (!string.IsNullOrWhiteSpace(detail))
-                {
-                    TextRenderer.DrawText(
-                        e.Graphics, detail, small,
-                        new Rectangle(18, Height - 27, Width - 36, 19),
-                        Reading.Health == HealthLevel.Healthy ? Palette.Muted : statusColor,
-                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
-                        TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
-                }
             }
         }
 
@@ -1215,6 +1449,11 @@ namespace GpuSentinel
     internal sealed class TrendChart : Control
     {
         private IList<HistorySample> samples = new List<HistorySample>();
+        private IList<GpuReading> devices = new List<GpuReading>();
+        private static readonly Color[] SeriesColors =
+        {
+            Palette.Cyan, Palette.Green, Palette.Amber, Palette.Blue, Palette.Red
+        };
 
         public TrendChart()
         {
@@ -1223,9 +1462,10 @@ namespace GpuSentinel
             BackColor = Palette.Background;
         }
 
-        public void SetSamples(IList<HistorySample> data)
+        public void SetSamples(IList<HistorySample> data, IList<GpuReading> selectedDevices)
         {
             samples = data;
+            devices = selectedDevices ?? new List<GpuReading>();
             Invalidate();
         }
 
@@ -1234,7 +1474,7 @@ namespace GpuSentinel
             base.OnPaint(e);
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             Rectangle bounds = new Rectangle(0, 0, Width - 1, Height - 1);
-            DrawingUtil.DrawSection(e.Graphics, bounds, "GPU 利用率趋势");
+            DrawingUtil.DrawSection(e.Graphics, bounds, "所选显卡利用率趋势");
             Rectangle plot = new Rectangle(48, 50, Math.Max(20, Width - 68), Math.Max(20, Height - 80));
 
             using (Font small = new Font("Segoe UI", 8f, FontStyle.Regular))
@@ -1254,11 +1494,13 @@ namespace GpuSentinel
                 e.Graphics.DrawLine(new Pen(Palette.Border), plot.Left, plot.Bottom, plot.Right, plot.Bottom);
             }
 
-            DrawLegend(e.Graphics, new Rectangle(Width - 210, 12, 190, 24));
+            DrawLegend(e.Graphics, new Rectangle(Math.Max(240, Width - 330), 12, 320, 32));
             if (samples.Count >= 2)
             {
-                DrawSeries(e.Graphics, plot, Palette.Cyan, true, samples.Count);
-                DrawSeries(e.Graphics, plot, Palette.Green, false, samples.Count);
+                for (int index = 0; index < Math.Min(devices.Count, SeriesColors.Length); index++)
+                {
+                    DrawSeries(e.Graphics, plot, SeriesColors[index], devices[index].DeviceKey, samples.Count);
+                }
             }
             else
             {
@@ -1271,7 +1513,7 @@ namespace GpuSentinel
             }
         }
 
-        private void DrawSeries(Graphics graphics, Rectangle plot, Color color, bool v100, int count)
+        private void DrawSeries(Graphics graphics, Rectangle plot, Color color, string deviceKey, int count)
         {
             using (Pen pen = new Pen(color, 2f))
             {
@@ -1280,7 +1522,11 @@ namespace GpuSentinel
                 PointF previous = PointF.Empty;
                 for (int i = 0; i < count; i++)
                 {
-                    double value = v100 ? samples[i].V100Usage : samples[i].RTXUsage;
+                    double value;
+                    if (!samples[i].Usage.TryGetValue(deviceKey, out value))
+                    {
+                        value = -1;
+                    }
                     if (value < 0)
                     {
                         previous = PointF.Empty;
@@ -1298,23 +1544,38 @@ namespace GpuSentinel
             }
         }
 
-        private static void DrawLegend(Graphics graphics, Rectangle bounds)
+        private void DrawLegend(Graphics graphics, Rectangle bounds)
         {
             using (Font font = new Font("Segoe UI", 8f, FontStyle.Regular))
-            using (SolidBrush cyan = new SolidBrush(Palette.Cyan))
-            using (SolidBrush green = new SolidBrush(Palette.Green))
             {
-                graphics.FillEllipse(cyan, bounds.Left, bounds.Top + 8, 7, 7);
-                TextRenderer.DrawText(
-                    graphics, "V100", font,
-                    new Rectangle(bounds.Left + 12, bounds.Top, 60, 22), Palette.Muted,
-                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-                graphics.FillEllipse(green, bounds.Left + 88, bounds.Top + 8, 7, 7);
-                TextRenderer.DrawText(
-                    graphics, "RTX 5070", font,
-                    new Rectangle(bounds.Left + 100, bounds.Top, 82, 22), Palette.Muted,
-                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                int shown = Math.Min(devices.Count, SeriesColors.Length);
+                for (int index = 0; index < shown; index++)
+                {
+                    int column = index % 2;
+                    int row = index / 2;
+                    int left = bounds.Left + column * 155;
+                    int top = bounds.Top + row * 15;
+                    using (SolidBrush dot = new SolidBrush(SeriesColors[index]))
+                    {
+                        graphics.FillEllipse(dot, left, top + 5, 7, 7);
+                    }
+                    TextRenderer.DrawText(
+                        graphics, LabelFor(devices[index]), font,
+                        new Rectangle(left + 12, top - 3, 138, 22), Palette.Muted,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
+                        TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
+                }
             }
+        }
+
+        private static string LabelFor(GpuReading reading)
+        {
+            string name = reading == null ? "GPU" : reading.Name;
+            if (name.Length <= 22)
+            {
+                return name;
+            }
+            return name.Substring(0, 20) + "...";
         }
     }
 
@@ -1345,7 +1606,7 @@ namespace GpuSentinel
             using (Font textFont = new Font("Segoe UI", 8.2f, FontStyle.Regular))
             {
                 int y = 48;
-                int count = Math.Min(7, items.Count);
+                int count = Math.Min(5, items.Count);
                 for (int offset = 0; offset < count; offset++)
                 {
                     LogItem item = items[items.Count - 1 - offset];
@@ -1360,11 +1621,11 @@ namespace GpuSentinel
                         TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
                     TextRenderer.DrawText(
                         e.Graphics, item.Message, textFont,
-                        new Rectangle(119, y - 1, Width - 135, 38),
+                        new Rectangle(119, y - 1, Width - 135, 42),
                         Palette.Muted,
                         TextFormatFlags.Left | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis |
                         TextFormatFlags.NoPadding);
-                    y += 39;
+                    y += 49;
                 }
                 if (items.Count == 0)
                 {
@@ -1376,13 +1637,136 @@ namespace GpuSentinel
         }
     }
 
+    internal sealed class DeviceSelectionForm : Form
+    {
+        private readonly CheckedListBox devicesList;
+        private readonly List<PnpReading> devices;
+
+        public List<string> SelectedIds { get; private set; }
+
+        public DeviceSelectionForm(IEnumerable<PnpReading> availableDevices, ISet<string> selectedIds)
+        {
+            devices = (availableDevices ?? Enumerable.Empty<PnpReading>()).ToList();
+            SelectedIds = new List<string>();
+
+            Text = "选择要监视的显卡";
+            StartPosition = FormStartPosition.CenterParent;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ShowInTaskbar = false;
+            ClientSize = new Size(650, 430);
+            BackColor = Palette.Background;
+            ForeColor = Palette.Text;
+            Font = new Font("Segoe UI", 9f, FontStyle.Regular);
+
+            Label hint = new Label();
+            hint.Text = "勾选需要同时监视的核显、独显或计算卡。未勾选设备不会采集。";
+            hint.ForeColor = Palette.Muted;
+            hint.AutoSize = false;
+            hint.Location = new Point(18, 14);
+            hint.Size = new Size(614, 32);
+
+            devicesList = new CheckedListBox();
+            devicesList.Location = new Point(18, 50);
+            devicesList.Size = new Size(614, 300);
+            devicesList.CheckOnClick = true;
+            devicesList.BackColor = Palette.Surface;
+            devicesList.ForeColor = Palette.Text;
+            devicesList.BorderStyle = BorderStyle.FixedSingle;
+            devicesList.Font = new Font("Segoe UI", 9f, FontStyle.Regular);
+            devicesList.HorizontalScrollbar = true;
+            devicesList.HorizontalExtent = 900;
+
+            foreach (PnpReading device in devices)
+            {
+                string state = device.ProblemCode == 0 ? "正常" : device.ProblemText;
+                string driver = string.IsNullOrWhiteSpace(device.DriverVersion) ? "--" : device.DriverVersion;
+                string label = "[" + device.Vendor + "]  " + device.Name + "   · " + state + "   · " + driver;
+                int index = devicesList.Items.Add(label);
+                bool shouldCheck = selectedIds == null || selectedIds.Count == 0 || selectedIds.Contains(device.InstanceId);
+                devicesList.SetItemChecked(index, shouldCheck);
+            }
+
+            Button selectAll = new Button();
+            selectAll.Text = "全选";
+            selectAll.Location = new Point(18, 365);
+            selectAll.Size = new Size(88, 32);
+            selectAll.FlatStyle = FlatStyle.Flat;
+            selectAll.Click += delegate
+            {
+                for (int index = 0; index < devicesList.Items.Count; index++)
+                {
+                    devicesList.SetItemChecked(index, true);
+                }
+            };
+
+            Button clear = new Button();
+            clear.Text = "清空";
+            clear.Location = new Point(114, 365);
+            clear.Size = new Size(88, 32);
+            clear.FlatStyle = FlatStyle.Flat;
+            clear.Click += delegate
+            {
+                for (int index = 0; index < devicesList.Items.Count; index++)
+                {
+                    devicesList.SetItemChecked(index, false);
+                }
+            };
+
+            Button ok = new Button();
+            ok.Text = "确定";
+            ok.Location = new Point(448, 365);
+            ok.Size = new Size(88, 32);
+            ok.DialogResult = DialogResult.OK;
+            ok.Click += delegate(object sender, EventArgs args)
+            {
+                List<string> chosen = new List<string>();
+                for (int index = 0; index < devicesList.Items.Count; index++)
+                {
+                    if (devicesList.GetItemChecked(index))
+                    {
+                        chosen.Add(devices[index].InstanceId);
+                    }
+                }
+                if (chosen.Count == 0)
+                {
+                    DialogResult = DialogResult.None;
+                    MessageBox.Show(this, "至少选择一张显卡。", "GPU Sentinel",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                SelectedIds = chosen;
+            };
+
+            Button cancel = new Button();
+            cancel.Text = "取消";
+            cancel.Location = new Point(544, 365);
+            cancel.Size = new Size(88, 32);
+            cancel.DialogResult = DialogResult.Cancel;
+
+            Controls.Add(hint);
+            Controls.Add(devicesList);
+            Controls.Add(selectAll);
+            Controls.Add(clear);
+            Controls.Add(ok);
+            Controls.Add(cancel);
+            AcceptButton = ok;
+            CancelButton = cancel;
+        }
+    }
+
     internal sealed class MainForm : Form
     {
         private readonly AppConfig config;
         private readonly MonitorService monitorService;
         private readonly HeaderView header;
-        private readonly DeviceCard v100Card;
-        private readonly DeviceCard rtxCard;
+        private readonly FlowLayoutPanel cardsPanel;
+        private readonly Dictionary<string, DeviceCard> deviceCards;
+        private readonly Dictionary<string, HealthLevel> previousDeviceHealth;
+        private readonly HashSet<string> selectedDevices;
+        private List<PnpReading> availableDevices;
+        private readonly bool openDeviceSelectorOnShow;
         private readonly TrendChart trendChart;
         private readonly EventListView eventList;
         private readonly ToolStripStatusLabel statusLabel;
@@ -1397,16 +1781,35 @@ namespace GpuSentinel
         private readonly object csvLock = new object();
         private bool refreshing;
         private bool allowExit;
-        private HealthLevel previousV100Health;
         private DateTime previousAlertTime;
         private string lastSmiError;
 
-        public MainForm()
+        public MainForm() : this(false)
         {
+        }
+
+        public MainForm(bool showDeviceSelector)
+        {
+            openDeviceSelectorOnShow = showDeviceSelector;
             config = AppConfig.Load();
             monitorService = new MonitorService();
             history = new List<HistorySample>();
             events = new List<LogItem>();
+            deviceCards = new Dictionary<string, DeviceCard>(StringComparer.OrdinalIgnoreCase);
+            previousDeviceHealth = new Dictionary<string, HealthLevel>(StringComparer.OrdinalIgnoreCase);
+            selectedDevices = new HashSet<string>(config.SelectedDevices, StringComparer.OrdinalIgnoreCase);
+            availableDevices = monitorService.GetAvailableDevices();
+            if (selectedDevices.Count == 0)
+            {
+                foreach (PnpReading device in availableDevices)
+                {
+                    selectedDevices.Add(device.InstanceId);
+                }
+                if (selectedDevices.Count > 0)
+                {
+                    config.SaveSelectedDevices(selectedDevices);
+                }
+            }
             logDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
             Directory.CreateDirectory(logDirectory);
 
@@ -1414,8 +1817,8 @@ namespace GpuSentinel
             BackColor = Palette.Background;
             ForeColor = Palette.Text;
             StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(1020, 720);
-            Size = new Size(1180, 820);
+            MinimumSize = new Size(980, 720);
+            Size = new Size(1260, 850);
             AutoScaleMode = AutoScaleMode.Dpi;
             Font = new Font("Segoe UI", 9f, FontStyle.Regular);
             Icon = CreateWindowIcon();
@@ -1440,47 +1843,38 @@ namespace GpuSentinel
             root.Controls.Add(header, 0, 0);
 
             IconButton refreshButton = CreateButton("\uE72C", "刷新");
-            IconButton llamaButton = CreateButton("\uE774", "llama");
+            IconButton devicesButton = CreateButton("\uE7F4", "显卡");
+            IconButton llamaButton = CreateButton("\uE774", "LLM");
             IconButton logsButton = CreateButton("\uE8A5", "日志");
             IconButton configButton = CreateButton("\uE713", "配置");
             refreshButton.Click += delegate { RefreshData(true); };
+            devicesButton.Click += delegate { OpenDeviceSelection(); };
             llamaButton.Click += delegate { OpenLlama(); };
             logsButton.Click += delegate { OpenLogs(); };
             configButton.Click += delegate { OpenConfig(); };
             header.ButtonPanel.Controls.Add(refreshButton);
+            header.ButtonPanel.Controls.Add(devicesButton);
             header.ButtonPanel.Controls.Add(llamaButton);
             header.ButtonPanel.Controls.Add(logsButton);
             header.ButtonPanel.Controls.Add(configButton);
 
             toolTip = new ToolTip();
-            toolTip.SetToolTip(refreshButton, "立即刷新两张显卡状态");
+            toolTip.SetToolTip(refreshButton, "立即刷新所选显卡状态");
+            toolTip.SetToolTip(devicesButton, "选择要监视的核显、独显或计算卡");
             toolTip.SetToolTip(llamaButton, "打开本机 llama.cpp Web UI");
             toolTip.SetToolTip(logsButton, "打开监控日志目录");
             toolTip.SetToolTip(configButton, "编辑监控器配置");
 
-            TableLayoutPanel cards = new TableLayoutPanel();
-            cards.Dock = DockStyle.Fill;
-            cards.Margin = new Padding(0, 0, 0, 10);
-            cards.ColumnCount = 2;
-            cards.RowCount = 1;
-            cards.BackColor = Palette.Background;
-            cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            root.Controls.Add(cards, 0, 1);
-
-            v100Card = new DeviceCard();
-            v100Card.Dock = DockStyle.Fill;
-            v100Card.Margin = new Padding(0, 0, 7, 0);
-            v100Card.Accent = Palette.Cyan;
-            v100Card.ShortRole = "TESLA V100";
-            cards.Controls.Add(v100Card, 0, 0);
-
-            rtxCard = new DeviceCard();
-            rtxCard.Dock = DockStyle.Fill;
-            rtxCard.Margin = new Padding(7, 0, 0, 0);
-            rtxCard.Accent = Palette.Green;
-            rtxCard.ShortRole = "RTX 5070";
-            cards.Controls.Add(rtxCard, 1, 0);
+            cardsPanel = new FlowLayoutPanel();
+            cardsPanel.Dock = DockStyle.Fill;
+            cardsPanel.Margin = new Padding(0, 0, 0, 10);
+            cardsPanel.Padding = new Padding(0, 0, 0, 8);
+            cardsPanel.FlowDirection = FlowDirection.LeftToRight;
+            cardsPanel.WrapContents = false;
+            cardsPanel.AutoScroll = true;
+            cardsPanel.BackColor = Palette.Background;
+            cardsPanel.Resize += delegate { LayoutDeviceCards(); };
+            root.Controls.Add(cardsPanel, 0, 1);
 
             TableLayoutPanel lower = new TableLayoutPanel();
             lower.Dock = DockStyle.Fill;
@@ -1501,6 +1895,8 @@ namespace GpuSentinel
             eventList.Dock = DockStyle.Fill;
             eventList.Margin = new Padding(7, 0, 0, 0);
             lower.Controls.Add(eventList, 1, 0);
+
+            RebuildCards(availableDevices);
 
             StatusStrip statusStrip = new StatusStrip();
             statusStrip.Dock = DockStyle.Fill;
@@ -1545,9 +1941,13 @@ namespace GpuSentinel
             timer.Tick += delegate { RefreshData(false); };
             Shown += delegate
             {
-                AddEvent(HealthLevel.Healthy, "监控器已启动，等待第一次采样");
+                AddEvent(HealthLevel.Healthy, "监控器已启动，将监视所选显卡");
                 RefreshData(true);
                 timer.Start();
+                if (openDeviceSelectorOnShow)
+                {
+                    BeginInvoke(new Action(OpenDeviceSelection));
+                }
                 if (config.StartMinimized)
                 {
                     BeginInvoke(new Action(HideToTray));
@@ -1582,8 +1982,114 @@ namespace GpuSentinel
             IconButton button = new IconButton();
             button.Glyph = glyph;
             button.Label = label;
+            button.AccessibleName = label;
+            button.AccessibleRole = AccessibleRole.PushButton;
             button.Margin = new Padding(6, 0, 0, 0);
             return button;
+        }
+
+        private void OpenDeviceSelection()
+        {
+            availableDevices = monitorService.GetAvailableDevices();
+            if (availableDevices.Count == 0)
+            {
+                MessageBox.Show(this, "未发现 PCI 显示适配器。", "GPU Sentinel",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            using (DeviceSelectionForm dialog = new DeviceSelectionForm(availableDevices, selectedDevices))
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK)
+                {
+                    return;
+                }
+                selectedDevices.Clear();
+                foreach (string id in dialog.SelectedIds)
+                {
+                    selectedDevices.Add(id);
+                }
+                config.SaveSelectedDevices(selectedDevices);
+            }
+
+            monitorService.InvalidatePnpCache();
+            RebuildCards(availableDevices);
+            AddEvent(HealthLevel.Healthy,
+                "监视设备已更新为 " + selectedDevices.Count.ToString(CultureInfo.InvariantCulture) + " 张显卡");
+            RefreshData(true);
+        }
+
+        private void RebuildCards(IEnumerable<PnpReading> devices)
+        {
+            cardsPanel.SuspendLayout();
+            cardsPanel.Controls.Clear();
+            deviceCards.Clear();
+            previousDeviceHealth.Clear();
+
+            foreach (PnpReading device in devices ?? Enumerable.Empty<PnpReading>())
+            {
+                if (!selectedDevices.Contains(device.InstanceId))
+                {
+                    continue;
+                }
+
+                DeviceCard card = new DeviceCard();
+                card.Accent = VendorColor(device.Vendor);
+                card.ShortRole = VendorRole(device.Vendor);
+                card.Margin = new Padding(0, 0, 14, 0);
+                card.Cursor = Cursors.Hand;
+                card.AccessibleName = device.Name;
+                card.Click += delegate { OpenDeviceSelection(); };
+                card.Reading = new GpuReading(VendorRole(device.Vendor))
+                {
+                    DeviceKey = device.InstanceId,
+                    Vendor = device.Vendor,
+                    Name = device.Name,
+                    DriverVersion = string.IsNullOrWhiteSpace(device.DriverVersion) ? "--" : device.DriverVersion,
+                    InfName = string.IsNullOrWhiteSpace(device.InfName) ? "--" : device.InfName,
+                    ProblemCode = device.ProblemCode,
+                    Present = device.Present
+                };
+                cardsPanel.Controls.Add(card);
+                deviceCards[device.InstanceId] = card;
+            }
+
+            cardsPanel.ResumeLayout();
+            LayoutDeviceCards();
+        }
+
+        private void LayoutDeviceCards()
+        {
+            int count = cardsPanel.Controls.Count;
+            if (count == 0)
+            {
+                return;
+            }
+            int columns = Math.Min(Math.Max(1, count), 3);
+            int viewport = Math.Max(cardsPanel.Width, ClientSize.Width - 56);
+            int available = Math.Max(320, viewport - 24);
+            int width = Math.Max(280, (available - (columns - 1) * 14) / columns);
+            int height = Math.Max(250, cardsPanel.ClientSize.Height - 24);
+            foreach (Control control in cardsPanel.Controls)
+            {
+                control.Size = new Size(width, height);
+            }
+        }
+
+        private static Color VendorColor(string vendor)
+        {
+            if (string.Equals(vendor, "NVIDIA", StringComparison.OrdinalIgnoreCase)) return Palette.Green;
+            if (string.Equals(vendor, "Intel", StringComparison.OrdinalIgnoreCase)) return Palette.Cyan;
+            if (string.Equals(vendor, "AMD", StringComparison.OrdinalIgnoreCase)) return Palette.Amber;
+            return Palette.Blue;
+        }
+
+        private static string VendorRole(string vendor)
+        {
+            if (string.Equals(vendor, "NVIDIA", StringComparison.OrdinalIgnoreCase)) return "NVIDIA";
+            if (string.Equals(vendor, "Intel", StringComparison.OrdinalIgnoreCase)) return "INTEL";
+            if (string.Equals(vendor, "AMD", StringComparison.OrdinalIgnoreCase)) return "AMD";
+            return "GPU";
         }
 
         private void RefreshData(bool manual)
@@ -1638,39 +2144,57 @@ namespace GpuSentinel
         private void ApplySnapshot(MonitorSnapshot snapshot)
         {
             refreshing = false;
-            v100Card.Reading = snapshot.V100;
-            rtxCard.Reading = snapshot.RTX5070;
-            v100Card.Invalidate();
-            rtxCard.Invalidate();
+            List<GpuReading> readings = snapshot.Devices.ToList();
+            foreach (GpuReading reading in readings)
+            {
+                DeviceCard card;
+                if (!deviceCards.TryGetValue(reading.DeviceKey, out card))
+                {
+                    card = new DeviceCard();
+                    card.Margin = new Padding(0, 0, 14, 0);
+                    card.Cursor = Cursors.Hand;
+                    card.Click += delegate { OpenDeviceSelection(); };
+                    cardsPanel.Controls.Add(card);
+                    deviceCards[reading.DeviceKey] = card;
+                }
+                card.Accent = VendorColor(reading.Vendor);
+                card.ShortRole = VendorRole(reading.Vendor);
+                card.Reading = reading;
+                card.AccessibleName = reading.Name;
+                card.AccessibleRole = AccessibleRole.Pane;
+                card.Invalidate();
+                toolTip.SetToolTip(card, BuildCardTooltip(reading));
+            }
+            LayoutDeviceCards();
 
             header.SetState(
-                "V100 + RTX 5070  ·  " + snapshot.Timestamp.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                readings.Count.ToString(CultureInfo.InvariantCulture) + " 张显卡  ·  " +
+                snapshot.Timestamp.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
                 snapshot.OverallText,
                 snapshot.OverallHealth);
             trayIcon.Icon = CreateTrayIcon(snapshot.OverallHealth);
             trayIcon.Text = TrimBalloonText("GPU Sentinel - " + snapshot.OverallText);
 
-            history.Add(new HistorySample
+            HistorySample sample = new HistorySample();
+            sample.Timestamp = snapshot.Timestamp;
+            foreach (GpuReading reading in readings)
             {
-                Timestamp = snapshot.Timestamp,
-                V100Usage = snapshot.V100.UsagePercent,
-                RTXUsage = snapshot.RTX5070.UsagePercent,
-                V100Temperature = snapshot.V100.TemperatureC,
-                RTXTemperature = snapshot.RTX5070.TemperatureC
-            });
+                sample.Usage[reading.DeviceKey] = reading.UsagePercent;
+                sample.Temperature[reading.DeviceKey] = reading.TemperatureC;
+            }
+            history.Add(sample);
             while (history.Count > config.HistoryPoints)
             {
                 history.RemoveAt(0);
             }
-            trendChart.SetSamples(new List<HistorySample>(history));
+            trendChart.SetSamples(new List<HistorySample>(history), readings);
             eventList.SetItems(new List<LogItem>(events));
 
             statusLabel.Text = snapshot.OverallText;
             statusLabel.ForeColor = DrawingUtil.HealthColor(snapshot.OverallHealth);
             refreshedLabel.Text = "最后刷新 " + Formatters.Time(snapshot.Timestamp);
-            detailLabel.Text = "自动刷新 " + config.RefreshSeconds + "s";
-            toolTip.SetToolTip(v100Card, BuildCardTooltip(snapshot.V100));
-            toolTip.SetToolTip(rtxCard, BuildCardTooltip(snapshot.RTX5070));
+            detailLabel.Text = "监视 " + readings.Count.ToString(CultureInfo.InvariantCulture) +
+                " 张 · 自动刷新 " + config.RefreshSeconds + "s";
             if (!string.IsNullOrWhiteSpace(snapshot.RawError) &&
                 !string.Equals(snapshot.RawError, lastSmiError, StringComparison.Ordinal))
             {
@@ -1678,37 +2202,41 @@ namespace GpuSentinel
                 lastSmiError = snapshot.RawError;
             }
 
-            if (previousV100Health != snapshot.V100.Health)
+            foreach (GpuReading reading in readings)
             {
-                AddEvent(snapshot.V100.Health,
-                    snapshot.V100.Health == HealthLevel.Healthy
-                        ? "V100 已就绪，驱动 " + snapshot.V100.DriverVersion
-                        : "V100 状态变为 " + snapshot.V100.StatusText + " · " + snapshot.V100.StatusDetail);
-                if (snapshot.V100.Health != HealthLevel.Healthy &&
-                    previousV100Health == HealthLevel.Healthy &&
-                    (DateTime.Now - previousAlertTime).TotalMinutes > 2)
+                HealthLevel previous;
+                bool hadPrevious = previousDeviceHealth.TryGetValue(reading.DeviceKey, out previous);
+                if (!hadPrevious || previous != reading.Health)
                 {
-                    trayIcon.ShowBalloonTip(
-                        5000,
-                        "V100 状态异常",
-                        snapshot.V100.StatusText + " · " + snapshot.V100.StatusDetail,
+                    AddEvent(reading.Health,
+                        reading.Name + " · " + reading.StatusText +
+                        (string.IsNullOrWhiteSpace(reading.StatusDetail) ? string.Empty : " · " + reading.StatusDetail));
+                    if (hadPrevious && reading.Health != HealthLevel.Healthy &&
+                        previous == HealthLevel.Healthy &&
+                        (DateTime.Now - previousAlertTime).TotalMinutes > 2)
+                    {
+                        trayIcon.ShowBalloonTip(
+                            5000,
+                            reading.Name + " 状态异常",
+                            reading.StatusText + " · " + reading.StatusDetail,
+                            ToolTipIcon.Warning);
+                        previousAlertTime = DateTime.Now;
+                    }
+                    previousDeviceHealth[reading.DeviceKey] = reading.Health;
+                }
+
+                if (reading.Health == HealthLevel.Healthy &&
+                    config.AlertTemperature > 0 &&
+                    reading.TemperatureC >= config.AlertTemperature &&
+                    (DateTime.Now - previousAlertTime).TotalMinutes > 5)
+                {
+                    AddEvent(HealthLevel.Warning, reading.Name + " 温度达到 " +
+                        Formatters.Number(reading.TemperatureC, " °C", 0));
+                    trayIcon.ShowBalloonTip(5000, reading.Name + " 温度过高",
+                        "当前温度 " + Formatters.Number(reading.TemperatureC, " °C", 0),
                         ToolTipIcon.Warning);
                     previousAlertTime = DateTime.Now;
                 }
-                previousV100Health = snapshot.V100.Health;
-            }
-
-            if (snapshot.V100.Health == HealthLevel.Healthy &&
-                config.AlertTemperature > 0 &&
-                snapshot.V100.TemperatureC >= config.AlertTemperature &&
-                (DateTime.Now - previousAlertTime).TotalMinutes > 5)
-            {
-                AddEvent(HealthLevel.Warning, "V100 温度达到 " +
-                    Formatters.Number(snapshot.V100.TemperatureC, " °C", 0));
-                trayIcon.ShowBalloonTip(5000, "V100 温度过高",
-                    "当前温度 " + Formatters.Number(snapshot.V100.TemperatureC, " °C", 0),
-                    ToolTipIcon.Warning);
-                previousAlertTime = DateTime.Now;
             }
 
             WriteCsv(snapshot);
@@ -1761,8 +2289,10 @@ namespace GpuSentinel
                                 "timestamp,role,name,status,health,usage_pct,memory_used_mib,memory_total_mib," +
                                 "temperature_c,power_w,pstate,mode,driver,pcie,inf,problem");
                         }
-                        WriteCsvGpu(writer, snapshot.Timestamp, snapshot.V100);
-                        WriteCsvGpu(writer, snapshot.Timestamp, snapshot.RTX5070);
+                        foreach (GpuReading reading in snapshot.Devices)
+                        {
+                            WriteCsvGpu(writer, snapshot.Timestamp, reading);
+                        }
                     }
                 }
             }

@@ -23,7 +23,7 @@ llama.cpp 日志同时识别两张卡，并将一个 35B MoE GGUF 的 41/41 层�
 ## 功能
 
 - Windows 双 NVIDIA GPU 共存记录和恢复顺序
-- `GPU Sentinel` WinForms 监视器：利用率、显存、温度、功耗、时钟、PCIe、WDDM/TCC、INF、事件日志和 CSV 遥测
+- `GPU Sentinel` WinForms 监视器：自动发现并选择核显、独显和计算卡；NVIDIA 显示利用率、显存、温度、功耗、时钟和 PCIe，Intel/AMD 等设备显示 PnP、驱动、INF、状态和问题代码
 - 便携式 llama.cpp PowerShell 图形启动器：多模型选择、视觉投影、MTP、上下文、端口、GPU 顺序和 tensor split
 - CUDA 12.9 + `sm_70;sm_120` 编译脚本
 - 已编译 Windows x64 runtime，作为 GitHub Release 资产发布
@@ -102,6 +102,12 @@ monitor\V100Monitor.exe
 ```
 
 监视器只调用系统 `nvidia-smi`、PnP API 和 Windows 事件日志，不复制 NVIDIA DLL。
+
+点击顶部的“显卡”按钮可以勾选要同时监视的设备，例如 Intel 核显、RTX 5070 和 Tesla V100。也可用以下命令直接打开选择窗口：
+
+```text
+monitor\V100Monitor.exe --select-devices
+```
 
 ## 从源码构建
 

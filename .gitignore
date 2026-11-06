@@ -6,6 +6,9 @@ runtime/bin/*
 !runtime/bin/.gitkeep
 runtime/build/
 dist/
+monitor/V100Monitor.ini
+monitor/logs/
+monitor/*.log
 
 # Build and editor files
 *.user
