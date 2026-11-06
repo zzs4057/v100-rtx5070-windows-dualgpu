@@ -1,0 +1,40 @@
+name: validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  powershell-and-monitor:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse PowerShell files
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              Write-Error ("Parse failed: {0}`n{1}" -f $_.FullName, ($errors | Out-String))
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Build monitor
+        shell: pwsh
+        run: .\monitor\build.ps1
+
+      - name: Upload monitor artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GPU-Sentinel
+          path: monitor/V100Monitor.exe

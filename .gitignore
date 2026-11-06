@@ -1,0 +1,24 @@
+# Model weights and local generated files
+models/*
+!models/README.md
+logs/
+runtime/bin/*
+!runtime/bin/.gitkeep
+runtime/build/
+dist/
+
+# Build and editor files
+*.user
+*.suo
+.vs/
+.vscode/
+Thumbs.db
+Desktop.ini
+
+# Local secrets and telemetry
+.env
+*.token
+*token*.txt
+*.csv
+*.log
+!evidence/*.md
