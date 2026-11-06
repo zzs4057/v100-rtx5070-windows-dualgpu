@@ -27,6 +27,12 @@ including Intel integrated graphics, NVIDIA discrete GPUs and AMD adapters.
 
 No NVIDIA DLL is copied into the application directory.
 
+## Tested hardware
+
+- Intel integrated graphics + NVIDIA RTX 5070 Laptop were verified together
+- Tesla V100 monitoring was verified in the 581.15 dual-GPU configuration
+- AMD uses the same Windows PnP fallback path but has not been hardware-tested
+
 ## Privacy
 
 The monitor does not send telemetry over the network. CSV files are written
